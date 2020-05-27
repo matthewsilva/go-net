@@ -1,102 +1,151 @@
 package main
 
 import (
-       "errors"
-       "fmt"
+	"errors"
+	"fmt"
+	"math/rand"
 )
 
 type IP [4]uint8
+
 func (ip IP) String() string {
-     var output string = ""
-     for index, octet := range ip {
-     	 output += fmt.Sprint(octet)
-	 if index != 3 {
-	    output += "."
-	 }
-     }
-     return output
+	var output string = ""
+	for index, octet := range ip {
+		output += fmt.Sprint(octet)
+		if index != 3 {
+			output += "."
+		}
+	}
+	return output
 }
 
 type MAC [6]uint8
-var broadcast_mac MAC = MAC{0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}
+
+var broadcast_mac MAC = MAC{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+
 func (mac MAC) String() string {
-     return fmt.Sprintf("%x.%x.%x.%x.%x.%x",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5])
+	return fmt.Sprintf("%x.%x.%x.%x.%x.%x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
 }
 
 type Opcode int
 
 const (
-      ARP_REQUEST Opcode = iota
-      ARP_REPLY Opcode = iota
+	ARP_REQUEST Opcode = iota
+	ARP_REPLY   Opcode = iota
 )
 
 type FramePayload struct {
-     Op Opcode
+	Op Opcode
 }
 
 type Frame struct {
-     destMac MAC
-     sourceMac MAC
-     payload FramePayload
+	destMac   MAC
+	sourceMac MAC
+	payload   FramePayload
 }
 
 type Interface struct {
-     Name string
-     Ip IP
-     Mac MAC
-     // Denotes the host associated with this interface
-     Owner *Host
-     // Denotes where this interface is connected (nil if no connection)
-     Connected_to *Interface
+	Name string
+	Ip   IP
+	Mac  MAC
+	// Denotes the host associated with this interface
+	Owner Device
+	// Denotes where this interface is connected (nil if no connection)
+	Connected_to *Interface
+}
+
+func (intf *Interface) Send(frame Frame) {
+     if intf != nil && intf.Connected_to != nil {
+	intf.Connected_to.Owner.ReceiveFrame(frame, intf.Connected_to)
+     }
 }
 
 func (intf Interface) String() string {
-     var output string = ""
-     output += "Name:" + intf.Name
-     output += ","
-     output += "IP:" + intf.Ip.String()
-     output += ","
-     output += "MAC:" + intf.Mac.String()
-     return output
+	var output string = ""
+	output += "Name:" + intf.Name
+	output += ","
+	output += "IP:" + intf.Ip.String()
+	output += ","
+	output += "MAC:" + intf.Mac.String()
+	return output
 }
 
 type Host struct {
-     // TODO Need list of interfaces
-     // TODO add hostname
-     Intf Interface
-     arp_table map[IP]MAC
+	// TODO Need list of interfaces
+	// TODO add hostname
+	Intf      Interface
+	arp_table map[IP]MAC
 }
+
 func (host *Host) String() string {
-     return host.Intf.String() + "," + fmt.Sprint(host.arp_table)
+	return host.Intf.String() + "," + fmt.Sprint(host.arp_table)
 }
 
 func NewHost(ip IP, mac MAC) *Host {
-     var new_host Host = Host{Interface{"eth0"/*TODO*/,ip, mac, nil, nil}, make(map[IP]MAC)}
-     new_host.Intf.Owner = &new_host
-     return &new_host
+	var new_host Host = Host{Interface{"eth0" /*TODO*/, ip, mac, nil, nil}, make(map[IP]MAC)}
+	new_host.Intf.Owner = &new_host
+	return &new_host
 }
 
-/*
-type Switch struct {
-     Name string
-     Ports []Interface     
+type Device interface {
+	SendFrame(Frame)
+	ReceiveFrame(Frame, *Interface)
 }
-*/
+
+type Switch struct {
+	Name      string
+	Ports     []Interface
+	Mac_table map[MAC]*Interface
+}
+
+func NewSwitch(ports int) *Switch {
+	var swt Switch
+	swt.Name = "sw0"
+	swt.Ports = make([]Interface, ports)
+	for i := range swt.Ports {
+	    ip := IP{0,0,0,0} /*TODO*/
+	    mac := MAC{uint8(rand.Intn(256)),uint8(rand.Intn(256)),uint8(rand.Intn(256)),uint8(rand.Intn(256)),uint8(rand.Intn(256)),uint8(rand.Intn(256))}
+	    
+	    swt.Ports[i] = Interface{"eth0" /*TODO*/, ip, mac, &swt, nil}
+	}
+	swt.Mac_table = make(map[MAC]*Interface)
+	return &swt
+}
+
+func (swt *Switch) ReceiveFrame(frame Frame, intf *Interface) {
+	if swt != nil {
+		if _, found := swt.Mac_table[frame.sourceMac]; !found {
+			swt.Mac_table[frame.sourceMac] = intf
+		}
+		swt.SendFrame(frame)
+	}
+}
+
+// TODO Should not send frame out of the same port it was received on
+func (swt *Switch) SendFrame(frame Frame) {
+     if intf, found := swt.Mac_table[frame.destMac]; found {
+     	intf.Send(frame)
+     } else {
+       for _, intf := range swt.Ports {
+       	   intf.Send(frame)
+       }
+     }
+}
 
 // This is a meta function that allows the user to simulate
 // connecting two hosts on the network by ethernet
 func Connect(intf_1, intf_2 *Interface) error {
-   if (intf_1 == nil && intf_2 == nil) {
-      return errors.New("Connect(...): intf_1 and intf_2 are nil")
-   } else if (intf_1 == nil) {
-      return errors.New("Connect(...): intf_1 is nil")
-   } else if (intf_2 == nil) {
-      return errors.New("Connect(...): intf_2 is nil")
-   }
+	if intf_1 == nil && intf_2 == nil {
+		return errors.New("Connect(...): intf_1 and intf_2 are nil")
+	} else if intf_1 == nil {
+		return errors.New("Connect(...): intf_1 is nil")
+	} else if intf_2 == nil {
+		return errors.New("Connect(...): intf_2 is nil")
+	}
 
-   intf_1.Connected_to = intf_2
-   intf_2.Connected_to = intf_1
-   return nil
+	intf_1.Connected_to = intf_2
+	intf_2.Connected_to = intf_1
+	return nil
 }
 
 // TODO this should return a packet response??
@@ -119,7 +168,7 @@ func ProcessArpFrame(frame Frame) {
 	reply.sourceMac = host.Intf.Mac
 	reply.destIp = frame.sourceIp
 	reply.sourceIp = host.Intf.Ip
-	
+
 	// Send it back out the same interface
      	host.ForwardFrame(
      }
@@ -130,33 +179,47 @@ func ProcessArpFrame(frame Frame) {
 }
 */
 
-func (host *Host) ReceiveFrame(frame Frame) {
-     if host != nil {
-     	fmt.Println("ReceiveFrame(...): Receiving frame at ", frame.destMac)
-     	if frame.destMac == host.Intf.Mac {
-     	   fmt.Printf("ReceiveFrame(...): Frame reached destination, payload was %v \n", frame.payload)
-	   if frame.payload.Op == ARP_REQUEST {
-	      response := Frame{frame.sourceMac, frame.destMac, FramePayload{ARP_REPLY}}
-	      host.SendFrame(response)
-	   }
-     	}
-     }
+func (host *Host) ReceiveFrame(frame Frame, intf *Interface) {
+	if host != nil {
+		fmt.Println("ReceiveFrame(...): Receiving frame on interface ", intf)
+		if frame.destMac == host.Intf.Mac {
+			fmt.Printf("ReceiveFrame(...): Frame reached destination, payload was %v \n", frame.payload)
+			if frame.payload.Op == ARP_REQUEST {
+				response := Frame{frame.sourceMac, frame.destMac, FramePayload{ARP_REPLY}}
+				host.SendFrame(response)
+			}
+		}
+	}
 }
 
 func (host *Host) SendFrame(frame Frame) {
-     if host != nil {
-     	// Send the frame to wherever our interface is connected to
-     	host.Intf.Connected_to.Owner.ReceiveFrame(frame)
-     }
+	if host != nil {
+		// Send the frame out of our interface to wherever our interface is connected to
+		host.Intf.Send(frame)
+	}
 }
 
 func main() {
-     host_1 := NewHost(IP{10,0,0,1},MAC{0,0,0,0,0,0})
-     host_2 := NewHost(IP{10,0,0,2},MAC{0,0,0,0,0,1})
-     fmt.Println(host_1)
-     Connect(&(host_1.Intf), &(host_2.Intf))
-     host_1.SendFrame(Frame{host_2.Intf.Mac, host_1.Intf.Mac, FramePayload{ARP_REQUEST}})
-     return
+     	fmt.Println("Test 1 ======================================")
+	host_1 := NewHost(IP{10, 0, 0, 1}, MAC{0, 0, 0, 0, 0, 1})
+	host_2 := NewHost(IP{10, 0, 0, 2}, MAC{0, 0, 0, 0, 0, 2})
+	Connect(&(host_1.Intf), &(host_2.Intf))
+	host_1.SendFrame(Frame{host_2.Intf.Mac, host_1.Intf.Mac, FramePayload{ARP_REQUEST}})
+	
+     	fmt.Println("Test 2 ======================================")
+	host_3 := NewHost(IP{10, 0, 0, 3}, MAC{0, 0, 0, 0, 0, 3})
+	host_4 := NewHost(IP{10, 0, 0, 4}, MAC{0, 0, 0, 0, 0, 4})
+	swt_1 := NewSwitch(4)
+	Connect(&(host_3.Intf), &(swt_1.Ports[0]))
+	Connect(&(host_4.Intf), &(swt_1.Ports[1]))
+	host_3.SendFrame(Frame{host_4.Intf.Mac, host_3.Intf.Mac, FramePayload{ARP_REQUEST}})
+
+     	fmt.Println("Test 3 ======================================")
+	// Should get no response
+	host_3.SendFrame(Frame{host_1.Intf.Mac, host_3.Intf.Mac, FramePayload{ARP_REQUEST}})
+	
+
+	return
 }
 
 // TODO Turn this into a real application with a meta console for creating
