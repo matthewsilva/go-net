@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
+	"time"
 )
 
 type IP [4]uint8
@@ -28,7 +30,6 @@ func (mac MAC) String() string {
 }
 
 type Opcode int
-
 const (
 	ARP_REQUEST Opcode = iota
 	ARP_REPLY   Opcode = iota
@@ -41,22 +42,22 @@ type FramePayload struct {
 type Frame struct {
 	destMac   MAC
 	sourceMac MAC
-	payload   FramePayload
+	payload   FramePayload // TODO Need to find a way to make this a variably sized polymorphic struct
+		  	       // It's also possible to just make it a byte field but that wouldn't be very abstract
 }
 
 type Interface struct {
 	Name string
 	Ip   IP
 	Mac  MAC
-	// Denotes the host associated with this interface
-	Owner Device
 	// Denotes where this interface is connected (nil if no connection)
-	Connected_to *Interface
+	Connection chan Frame // channels represent an ethernet connection
+	Connected_to chan Frame // TODO both these channels need to be buffers to prevent deadlock
 }
 
 func (intf *Interface) Send(frame Frame) {
      if intf != nil && intf.Connected_to != nil {
-	intf.Connected_to.Owner.ReceiveFrame(frame, intf.Connected_to)
+	intf.Connected_to <- frame
      }
 }
 
@@ -82,20 +83,13 @@ func (host *Host) String() string {
 }
 
 func NewHost(ip IP, mac MAC) *Host {
-	var new_host Host = Host{Interface{"eth0" /*TODO*/, ip, mac, nil, nil}, make(map[IP]MAC)}
-	new_host.Intf.Owner = &new_host
-	return &new_host
-}
-
-type Device interface {
-	SendFrame(Frame)
-	ReceiveFrame(Frame, *Interface)
+	return &Host{Interface{"eth0" /*TODO*/, ip, mac, make(chan Frame), nil}, make(map[IP]MAC)}
 }
 
 type Switch struct {
 	Name      string
 	Ports     []Interface
-	Mac_table map[MAC]*Interface
+	Mac_table map[MAC]int // TODO access to this map may need to be synchronized (if a separate thread will be initiating sends on the network)
 }
 
 func NewSwitch(ports int) *Switch {
@@ -106,34 +100,52 @@ func NewSwitch(ports int) *Switch {
 	    ip := IP{0,0,0,0} /*TODO*/
 	    mac := MAC{uint8(rand.Intn(256)),uint8(rand.Intn(256)),uint8(rand.Intn(256)),uint8(rand.Intn(256)),uint8(rand.Intn(256)),uint8(rand.Intn(256))}
 	    
-	    swt.Ports[i] = Interface{"eth0" /*TODO*/, ip, mac, &swt, nil}
+	    swt.Ports[i] = Interface{"eth0" /*TODO*/, ip, mac, make(chan Frame), nil}
 	}
-	swt.Mac_table = make(map[MAC]*Interface)
+	swt.Mac_table = make(map[MAC]int)
 	return &swt
 }
 
-func (swt *Switch) ReceiveFrame(frame Frame, intf *Interface) {
+func (swt *Switch) PowerOn() {
+     var cases []reflect.SelectCase = make([]reflect.SelectCase,len(swt.Ports))
+     for i := range swt.Ports {
+     	 cases[i] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(swt.Ports[i].Connection)}
+     }
+     
+     for {
+          // reflect select
+     	  port_num, recv_frame, _ := reflect.Select(cases)
+	  swt.ReceiveFrame(recv_frame.Interface().(Frame), port_num)
+     }
+}
+
+func (swt *Switch) ReceiveFrame(frame Frame, recv_port_num int) {
 	if swt != nil {
 		if _, found := swt.Mac_table[frame.sourceMac]; !found {
-			swt.Mac_table[frame.sourceMac] = intf
+			swt.Mac_table[frame.sourceMac] = recv_port_num
 		}
-		swt.SendFrame(frame)
+		swt.SendFrame(frame, recv_port_num)
 	}
 }
 
 // TODO Should not send frame out of the same port it was received on
-func (swt *Switch) SendFrame(frame Frame) {
-     if intf, found := swt.Mac_table[frame.destMac]; found {
-     	intf.Send(frame)
+func (swt *Switch) SendFrame(frame Frame, recv_port_num int) {
+     if port_num, found := swt.Mac_table[frame.destMac]; found {
+     	swt.Ports[port_num].Send(frame)
      } else {
-       for _, intf := range swt.Ports {
-       	   intf.Send(frame)
+       for i, intf := range swt.Ports {
+       	   if i != recv_port_num {
+       	      intf.Send(frame)
+	   }
        }
      }
 }
 
 // This is a meta function that allows the user to simulate
 // connecting two hosts on the network by ethernet
+// TODO any synchronization required here? Yes, because intf_1 and intf_2 need to be simultaneuously connected
+// Otherwise, if the connecting thread decides to stall for a while, it is possible that a message could be sent across to intf_2
+// and intf_2 is still not connected back to intf_1 to allow for a response
 func Connect(intf_1, intf_2 *Interface) error {
 	if intf_1 == nil && intf_2 == nil {
 		return errors.New("Connect(...): intf_1 and intf_2 are nil")
@@ -142,9 +154,9 @@ func Connect(intf_1, intf_2 *Interface) error {
 	} else if intf_2 == nil {
 		return errors.New("Connect(...): intf_2 is nil")
 	}
-
-	intf_1.Connected_to = intf_2
-	intf_2.Connected_to = intf_1
+	// TODO need synchronization, see todo at method signature
+	intf_1.Connected_to = intf_2.Connection
+	intf_2.Connected_to = intf_1.Connection
 	return nil
 }
 
@@ -179,6 +191,18 @@ func ProcessArpFrame(frame Frame) {
 }
 */
 
+func (host *Host) PowerOn() {
+     var cases []reflect.SelectCase = make([]reflect.SelectCase,1)
+     cases[0] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(host.Intf.Connection)}
+     
+     for {
+          // reflect select
+     	  _, recv_frame, _ := reflect.Select(cases)
+	  // This is the management port case
+	  host.ReceiveFrame(recv_frame.Interface().(Frame), &(host.Intf))
+     }
+}
+
 func (host *Host) ReceiveFrame(frame Frame, intf *Interface) {
 	if host != nil {
 		fmt.Println("ReceiveFrame(...): Receiving frame on interface ", intf)
@@ -202,25 +226,36 @@ func (host *Host) SendFrame(frame Frame) {
 func main() {
      	fmt.Println("Test 1 ======================================")
 	host_1 := NewHost(IP{10, 0, 0, 1}, MAC{0, 0, 0, 0, 0, 1})
+	go host_1.PowerOn()
 	host_2 := NewHost(IP{10, 0, 0, 2}, MAC{0, 0, 0, 0, 0, 2})
+	go host_2.PowerOn()
 	Connect(&(host_1.Intf), &(host_2.Intf))
 	host_1.SendFrame(Frame{host_2.Intf.Mac, host_1.Intf.Mac, FramePayload{ARP_REQUEST}})
-	
+	time.Sleep(100000000)
      	fmt.Println("Test 2 ======================================")
 	host_3 := NewHost(IP{10, 0, 0, 3}, MAC{0, 0, 0, 0, 0, 3})
+	go host_3.PowerOn()
 	host_4 := NewHost(IP{10, 0, 0, 4}, MAC{0, 0, 0, 0, 0, 4})
+	go host_4.PowerOn()
 	swt_1 := NewSwitch(4)
+	go swt_1.PowerOn()
 	Connect(&(host_3.Intf), &(swt_1.Ports[0]))
 	Connect(&(host_4.Intf), &(swt_1.Ports[1]))
 	host_3.SendFrame(Frame{host_4.Intf.Mac, host_3.Intf.Mac, FramePayload{ARP_REQUEST}})
+	time.Sleep(100000000)
 
      	fmt.Println("Test 3 ======================================")
 	// Should get no response
 	host_3.SendFrame(Frame{host_1.Intf.Mac, host_3.Intf.Mac, FramePayload{ARP_REQUEST}})
+	time.Sleep(100000000)
 	
 
 	return
 }
+
+// TODO Can use mutex on receiving channels to emulate collision avoidance at the physical layer
+// (Alternatively, could use actual listening CSMA/CD-style to determine if anything has recently occurred on the channel,
+//  but that might be difficult to emulate using channels)
 
 // TODO Turn this into a real application with a meta console for creating
 // and configuring hosts/routers as well as console interfaces for each
