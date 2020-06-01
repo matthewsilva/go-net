@@ -2,11 +2,14 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"math/rand"
 	"reflect"
 	"time"
 )
+
+var debug_flag *bool
 
 type IP [4]uint8
 
@@ -258,7 +261,7 @@ func (host *Host) PowerOn() {
 
 func (host *Host) ReceiveFrame(frame Frame, intf *Interface) {
 	if host != nil {
-		fmt.Println("ReceiveFrame(...): Host", host, "receiving frame", frame)
+		if *debug_flag {fmt.Println("ReceiveFrame(...): Host", host, "receiving frame", frame)}
 		if frame.destMac == host.Intf.Mac || frame.destMac == broadcast_mac {
 			switch frame.etherType {
 			       case ARP: // Put each case into its own method
@@ -283,7 +286,7 @@ func (host *Host) ReceiveFrame(frame Frame, intf *Interface) {
 
 func (host *Host) SendFrame(frame Frame) {
 	if host != nil {
-		fmt.Println("SendFrame(...): Host", host, "sending frame", frame)
+		if *debug_flag {fmt.Println("SendFrame(...): Host", host, "sending frame", frame)}
 		// Send the frame out of our interface to wherever our interface is connected to
 		host.Intf.Send(frame)
 	}
@@ -295,7 +298,8 @@ func (host *Host) SendFrame(frame Frame) {
 // TODO To allow for sessions (and anything else that requires continuity between a send and subsequent receives), there should probably be a stack of "receivers" for running processes that need to act on specific received inputs that are related to packets they sent out earlier
 // One good example of the above is when a host wants to send a packet but needs to do an ARP request first. It needs to wait for the ARP request to be returned before it can correctly address the packet it wants to send across the network
 func main() {
-
+     debug_flag = flag.Bool("DEBUG", false, "a bool")
+     flag.Parse()
      	fmt.Println("Test 1 ======================================")
 	host_1 := NewHost(IP{10, 0, 0, 1}, MAC{0, 0, 0, 0, 0, 1})
 	go host_1.PowerOn()
