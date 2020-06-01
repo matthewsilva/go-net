@@ -260,21 +260,20 @@ func (host *Host) ReceiveFrame(frame Frame, intf *Interface) {
 	if host != nil {
 		fmt.Println("ReceiveFrame(...): Host", host, "receiving frame", frame)
 		if frame.destMac == host.Intf.Mac || frame.destMac == broadcast_mac {
-			fmt.Printf("ReceiveFrame(...): Frame reached destination, payload was %v \n", frame.payload)
-
 			switch frame.etherType {
 			       case ARP: // Put each case into its own method
 			       if payload, correct_type := frame.payload.Data.(ARPPayload); !correct_type {
 			       	  fmt.Printf("ReceiveFrame(...): Error, FramePayload was incorrect type %t\n", frame.payload.Data)
 			       } else {
-			       
-			       switch payload.OperationType {
-			       	      case ARP_REQUEST:
-				      	   reply := NewArpReplyFrame(host.Intf.Mac, host.Intf.Ip, payload.SourceHardwareAddr, payload.SourceProtocolAddr)
-				      	   host.SendFrame(reply)
-			       	      case ARP_REPLY:
-				      	   fmt.Println("ReceiveFrame(...): Received ARP_REPLY")
-				      	   host.arp_table[payload.SourceProtocolAddr] = payload.SourceHardwareAddr
+			       	 if payload.DestProtocolAddr == host.Intf.Ip {
+				 switch payload.OperationType {
+			       	 	case ARP_REQUEST:
+				 	reply := NewArpReplyFrame(host.Intf.Mac, host.Intf.Ip, payload.SourceHardwareAddr, payload.SourceProtocolAddr)
+				 	host.SendFrame(reply)
+			       	 	case ARP_REPLY:
+				      	fmt.Println("ReceiveFrame(...): Received ARP_REPLY")
+				      	host.arp_table[payload.SourceProtocolAddr] = payload.SourceHardwareAddr
+				 }
 			      }
 			      }
 		      }
@@ -306,7 +305,8 @@ func main() {
 	host_1.SendFrame(NewArpRequestFrame(host_1.Intf.Mac, host_1.Intf.Ip, host_2.Intf.Ip))
 	time.Sleep(100000000)
 	fmt.Println(host_1)
-/*
+	time.Sleep(100000000)
+
 	fmt.Println("Test 2 ======================================")
 	host_3 := NewHost(IP{10, 0, 0, 3}, MAC{0, 0, 0, 0, 0, 3})
 	go host_3.PowerOn()
@@ -316,12 +316,12 @@ func main() {
 	go swt_1.PowerOn()
 	Connect(&(host_3.Intf), &(swt_1.Ports[0]))
 	Connect(&(host_4.Intf), &(swt_1.Ports[1]))
-	host_3.SendFrame(Frame{host_4.Intf.Mac, host_3.Intf.Mac, FramePayload{ARP_REQUEST}})
+	host_3.SendFrame(NewArpRequestFrame(host_3.Intf.Mac, host_3.Intf.Ip, host_4.Intf.Ip))
 	time.Sleep(100000000)
 
      	fmt.Println("Test 3 ======================================")
 	// Should get no response
-	host_3.SendFrame(Frame{host_1.Intf.Mac, host_3.Intf.Mac, FramePayload{ARP_REQUEST}})
+	host_3.SendFrame(NewArpRequestFrame(host_3.Intf.Mac, host_3.Intf.Ip, host_1.Intf.Ip))
 	time.Sleep(100000000)
 
      	fmt.Println("Test 4 (Two Switches) ======================================")
@@ -336,9 +336,9 @@ func main() {
 	Connect(&(host_5.Intf), &(swt_2.Ports[0]))
 	Connect(&(host_6.Intf), &(swt_3.Ports[0]))
 	Connect(&(swt_2.Ports[1]), &(swt_3.Ports[1]))
-	host_5.SendFrame(Frame{host_6.Intf.Mac, host_5.Intf.Mac, FramePayload{ARP_REQUEST}})
+	host_5.SendFrame(NewArpRequestFrame(host_5.Intf.Mac, host_5.Intf.Ip, host_6.Intf.Ip))
 	time.Sleep(100000000)
-*/
+
 	return
 }
 
