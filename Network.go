@@ -29,21 +29,55 @@ func (mac MAC) String() string {
 	return fmt.Sprintf("%x.%x.%x.%x.%x.%x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
 }
 
-type Opcode int
+type Opcode uint16
 const (
 	ARP_REQUEST Opcode = iota
 	ARP_REPLY   Opcode = iota
 )
 
 type FramePayload struct {
-	Op Opcode
+	Data interface{}
 }
+
+type ARPPayload struct {
+     HardwareType uint16
+     ProtocolType uint16
+     HardwareAddrLen uint8
+     ProtocolAddrLen uint8
+     OperationType Opcode
+     SourceHardwareAddr MAC // TODO this should be uint48
+     SourceProtocolAddr IP // TODO this should be uint32
+     DestHardwareAddr MAC
+     DestProtocolAddr IP
+}
+
+type EtherType uint16
+const (
+      IPv4 EtherType = 0x0800
+      ARP EtherType = 0x0806
+)
 
 type Frame struct {
 	destMac   MAC
 	sourceMac MAC
+	etherType EtherType
 	payload   FramePayload // TODO Need to find a way to make this a variably sized polymorphic struct
 		  	       // It's also possible to just make it a byte field but that wouldn't be very abstract
+}
+func (frame Frame) String() string {
+     str:= fmt.Sprintf("Dest:%v, Source:%v, EtherType:%v,", frame.destMac, frame.sourceMac, frame.etherType)
+     switch frame.etherType {
+     case ARP:
+     	  if payload, correct_type := frame.payload.Data.(ARPPayload); !correct_type {
+	     	str += "Error:Incorrect payload type for etherType"
+	  } else {
+		str += fmt.Sprintf("ARPPayload{OperationType: %v}", payload.OperationType)
+	  }
+     default:
+	str += "Error:Unknown ethertype"
+     }
+     return str
+
 }
 
 type Interface struct {
@@ -143,7 +177,7 @@ func (swt *Switch) SendFrame(frame Frame, recv_port_num int) {
 
 // This is a meta function that allows the user to simulate
 // connecting two hosts on the network by ethernet
-// TODO any synchronization required here? Yes, because intf_1 and intf_2 need to be simultaneuously connected
+// TODO any synchronization required here? Yes, because inptf_1 and intf_2 need to be simultaneuously connected
 // Otherwise, if the connecting thread decides to stall for a while, it is possible that a message could be sent across to intf_2
 // and intf_2 is still not connected back to intf_1 to allow for a response
 func Connect(intf_1, intf_2 *Interface) error {
@@ -158,6 +192,25 @@ func Connect(intf_1, intf_2 *Interface) error {
 	intf_1.Connected_to = intf_2.Connection
 	intf_2.Connected_to = intf_1.Connection
 	return nil
+}
+
+func NewArpRequestFrame(sourceMac MAC, sourceIp IP, destIp IP) Frame {
+     return NewArpFrame(sourceMac, sourceIp, broadcast_mac, destIp, ARP_REQUEST)
+}
+func NewArpReplyFrame(sourceMac MAC, sourceIp IP, destMac MAC, destIp IP) Frame {
+     return NewArpFrame(sourceMac, sourceIp, destMac, destIp, ARP_REPLY)
+}
+func NewArpFrame(sourceMac MAC, sourceIp IP, destMac MAC, destIp IP, op Opcode) Frame {
+     var frame Frame
+     frame.sourceMac = sourceMac
+     frame.destMac = destMac
+     frame.etherType = ARP
+     frame.payload.Data = ARPPayload{OperationType: op,
+			SourceHardwareAddr: sourceMac,
+			SourceProtocolAddr: sourceIp,
+			DestHardwareAddr: destMac,
+			DestProtocolAddr: destIp}
+     return frame
 }
 
 // TODO this should return a packet response??
@@ -205,34 +258,56 @@ func (host *Host) PowerOn() {
 
 func (host *Host) ReceiveFrame(frame Frame, intf *Interface) {
 	if host != nil {
-		fmt.Println("ReceiveFrame(...): Receiving frame on interface ", intf)
-		if frame.destMac == host.Intf.Mac {
+		fmt.Println("ReceiveFrame(...): Host", host, "receiving frame", frame)
+		if frame.destMac == host.Intf.Mac || frame.destMac == broadcast_mac {
 			fmt.Printf("ReceiveFrame(...): Frame reached destination, payload was %v \n", frame.payload)
-			if frame.payload.Op == ARP_REQUEST {
-				response := Frame{frame.sourceMac, frame.destMac, FramePayload{ARP_REPLY}}
-				host.SendFrame(response)
-			}
+
+			switch frame.etherType {
+			       case ARP: // Put each case into its own method
+			       if payload, correct_type := frame.payload.Data.(ARPPayload); !correct_type {
+			       	  fmt.Printf("ReceiveFrame(...): Error, FramePayload was incorrect type %t\n", frame.payload.Data)
+			       } else {
+			       
+			       switch payload.OperationType {
+			       	      case ARP_REQUEST:
+				      	   reply := NewArpReplyFrame(host.Intf.Mac, host.Intf.Ip, payload.SourceHardwareAddr, payload.SourceProtocolAddr)
+				      	   host.SendFrame(reply)
+			       	      case ARP_REPLY:
+				      	   fmt.Println("ReceiveFrame(...): Received ARP_REPLY")
+				      	   host.arp_table[payload.SourceProtocolAddr] = payload.SourceHardwareAddr
+			      }
+			      }
+		      }
 		}
 	}
 }
 
 func (host *Host) SendFrame(frame Frame) {
 	if host != nil {
+		fmt.Println("SendFrame(...): Host", host, "sending frame", frame)
 		// Send the frame out of our interface to wherever our interface is connected to
 		host.Intf.Send(frame)
 	}
 }
 
+// TODO Everything more above and including an ARP request should probably be run in parallel because it needs to wait on the response after sending (Unless that logic can be worked into the ReceiveFrame method)
+// TODO The network actually could be deterministic even with parallel devices, if everything is calculated in steps (with a separate sending stage most likely). e.g. Every network tick, all devices receive once (there will be a barrier at the bottom of the infinite receive for loop, and a default case for no receives), process the packets, and prepare to send. Then they all wait on a barrier to send, then they all send. Only problem is that sends would all now need to be run as go routines because otherwise there would be deadlock on every send (if a switch wants to send, it will wait on the channel until somone receives, but all the other devices will be waiting at a barrier for their next read, and will never become ready to read. This could be fixed with channel buffers that don't block when writing, but that can come later
+
+// TODO To allow for sessions (and anything else that requires continuity between a send and subsequent receives), there should probably be a stack of "receivers" for running processes that need to act on specific received inputs that are related to packets they sent out earlier
+// One good example of the above is when a host wants to send a packet but needs to do an ARP request first. It needs to wait for the ARP request to be returned before it can correctly address the packet it wants to send across the network
 func main() {
+
      	fmt.Println("Test 1 ======================================")
 	host_1 := NewHost(IP{10, 0, 0, 1}, MAC{0, 0, 0, 0, 0, 1})
 	go host_1.PowerOn()
 	host_2 := NewHost(IP{10, 0, 0, 2}, MAC{0, 0, 0, 0, 0, 2})
 	go host_2.PowerOn()
 	Connect(&(host_1.Intf), &(host_2.Intf))
-	host_1.SendFrame(Frame{host_2.Intf.Mac, host_1.Intf.Mac, FramePayload{ARP_REQUEST}})
+	host_1.SendFrame(NewArpRequestFrame(host_1.Intf.Mac, host_1.Intf.Ip, host_2.Intf.Ip))
 	time.Sleep(100000000)
-     	fmt.Println("Test 2 ======================================")
+	fmt.Println(host_1)
+/*
+	fmt.Println("Test 2 ======================================")
 	host_3 := NewHost(IP{10, 0, 0, 3}, MAC{0, 0, 0, 0, 0, 3})
 	go host_3.PowerOn()
 	host_4 := NewHost(IP{10, 0, 0, 4}, MAC{0, 0, 0, 0, 0, 4})
@@ -248,8 +323,22 @@ func main() {
 	// Should get no response
 	host_3.SendFrame(Frame{host_1.Intf.Mac, host_3.Intf.Mac, FramePayload{ARP_REQUEST}})
 	time.Sleep(100000000)
-	
 
+     	fmt.Println("Test 4 (Two Switches) ======================================")
+	host_5 := NewHost(IP{10, 0, 0, 5}, MAC{0, 0, 0, 0, 0, 5})
+	go host_5.PowerOn()
+	host_6 := NewHost(IP{10, 0, 0, 6}, MAC{0, 0, 0, 0, 0, 6})
+	go host_6.PowerOn()
+	swt_2 := NewSwitch(2)
+	go swt_2.PowerOn()
+	swt_3 := NewSwitch(2)
+	go swt_3.PowerOn()
+	Connect(&(host_5.Intf), &(swt_2.Ports[0]))
+	Connect(&(host_6.Intf), &(swt_3.Ports[0]))
+	Connect(&(swt_2.Ports[1]), &(swt_3.Ports[1]))
+	host_5.SendFrame(Frame{host_6.Intf.Mac, host_5.Intf.Mac, FramePayload{ARP_REQUEST}})
+	time.Sleep(100000000)
+*/
 	return
 }
 
