@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
+	"sync"
 	"time"
 )
 
@@ -108,11 +109,19 @@ func (intf Interface) String() string {
 	return output
 }
 
+// A session allows a procedure to set a watch on incoming frames to see if a matching frame comes in. The frame will get sent over the channel to notify the procedure that its expected frame has arrived
+type Session struct {
+     IsMatchingFrame func(Frame) bool
+     Response chan Frame
+}
+
 type Host struct {
 	// TODO Need list of interfaces
 	// TODO add hostname
 	Intf      Interface
 	arp_table map[IP]MAC
+	Sessions []Session
+	SessionsMutex sync.Mutex
 }
 
 func (host *Host) String() string {
@@ -120,7 +129,7 @@ func (host *Host) String() string {
 }
 
 func NewHost(ip IP, mac MAC) *Host {
-	return &Host{Interface{"eth0" /*TODO*/, ip, mac, make(chan Frame), nil}, make(map[IP]MAC)}
+	return &Host{Interface{"eth0" /*TODO*/, ip, mac, make(chan Frame), nil}, make(map[IP]MAC), nil, sync.Mutex{}}
 }
 
 type Switch struct {
@@ -216,16 +225,94 @@ func NewArpFrame(sourceMac MAC, sourceIp IP, destMac MAC, destIp IP, op Opcode) 
      return frame
 }
 
-// TODO this should return a packet response??
+/* Road Map:
+1. Implement simple layer 3 (IPv4 only?) packet sending
+2. Implement Routers and static routing
+3. Implement ICMP (ping / traceroute)
+4. Implement RIP ? Maybe?
+5. Implement UDP/TCP
+*/
+
+type Packet struct {
+     PacketMessage string
+}
+
+//func (host *Host) SendPacket(packet Packet) {
+
+/* If you want to send a packet, to a particular IP address, you have to first know the MAC Address.
+   If the MAC for the destination IP is not in the routing table, we need to send out an ARP request
+   and wait on the reply (this implies that SendPacket must have a way to wait for the return of the ARP Reply...)
+   Then, after receiving the reply, a regular frame gets sent to the destination using SendFrame
+
+   Best approach for doing this would be adding a slice of "open sessions" to the host, and determining if incoming
+   frames / packets are meant to be received by any of the open sessions. The open session would then be activated
+   for further processing, probably passing the the relevant frame/packet to the open session. A channel would be a
+   very natural way of representing this because it would allow for both synchronization between the open session
+   resuming processing (e.g. after an ARP reply came in) as well as the transfer of the required data for that
+   processing (e.g the ARP reply itself). Granted, for the current ARP application, the method for receiving Frames
+   from a channel already processes those ARP replies and modifies the ARP table. At least for this application,
+   specifically, the only synchronization required would be to have an ARP request wait for the completion of the
+   current processing of the ARP packet. Not sure if the design could be improved by moving this processing into
+   the areas where the response needs to be waited on. However, it might be really hard to implement TCP sessions?
+   We will see... Maybe TCP can just be a slice of TCP sessions on the host?
+*/
 /*
-func (host *Host) SendPacket(destIp IP) {
-     if mac, found := host.arp_table[destIP]; found {
-     	host.SendFrame(mac,destIp)
-     } else {
-        host.SendFrame(broadcast,destIp)
+     if _, found := host.arp_table[destIP]; !found {
+       if *debug_flag {fmt.Println("SendPacket(...): Sending ARP Request...")}
+	host.SendArpRequest(destIp)
+       if *debug_flag {fmt.Println("SendPacket(...): Received ARP Reply...")}
      }
+     if mac, found := host.arp_table[destIP]; found {
+          host.SendFrame(Frame{destMac: mac, sourceMac: host.Intf.Mac, etherType:IPv4, payload:FramePayload{"This is an IPv4 Test Message"})
+     } else {
+       fmt.Println("SendPacket(...): The ARP Request probably timed out, no MAC address found for destination IP")
+     }
+     
 }
 */
+
+func (host *Host) SendArpRequest(destIp IP) {
+     	var arp_reply_chan chan Frame = make(chan Frame)
+     	arp_request_session := Session{
+		    func(frame Frame) bool {
+			if payload, correct_type := frame.payload.Data.(ARPPayload); 
+			   frame.destMac == host.Intf.Mac && correct_type && 
+			   payload.SourceProtocolAddr == destIp && 
+			   payload.DestProtocolAddr == host.Intf.Ip && 
+			   payload.DestHardwareAddr == host.Intf.Mac {
+			   			    return true
+			   } else {
+			     return false
+			   }
+	            },
+		    arp_reply_chan}
+	host.SessionsMutex.Lock() 
+     	host.Sessions = append(host.Sessions, arp_request_session) // A session is composed of a Frame comparison function and a channel to notify on if that function returns true
+	host.SessionsMutex.Unlock()
+     	host.SendFrame(NewArpRequestFrame(host.Intf.Mac, host.Intf.Ip, destIp))
+	// Wait until the ARP request has been answered
+	<- arp_reply_chan // Nothing needs to be done with the output frame from the channel because ARP replies get handled automatically in ReceiveFrame such that we are able to accomodate unsolicited ARP announcements
+	if *debug_flag {fmt.Println("SendArpRequest(...): Received ARP Reply frame from Channel")}
+	
+}
+
+func RemoveFrameFromSlice(slice []Session, index_to_remove int) []Session {
+     slice = append(slice[:index_to_remove], slice[index_to_remove+1:]...)
+     return slice
+}
+
+func (host *Host) SendFrameToMatchingSessions(frame Frame, removeSessions bool) {
+     host.SessionsMutex.Lock()
+     for i, session := range host.Sessions {
+     	 if session.IsMatchingFrame(frame) {
+	    session.Response <- frame
+	    if removeSessions {
+	       host.Sessions = RemoveFrameFromSlice(host.Sessions,i)
+	    }
+	 }
+     }
+     host.SessionsMutex.Unlock()
+}
 
 /*
 func ProcessArpFrame(frame Frame) {
@@ -275,7 +362,11 @@ func (host *Host) ReceiveFrame(frame Frame, intf *Interface) {
 				 	host.SendFrame(reply)
 			       	 	case ARP_REPLY:
 				      	fmt.Println("ReceiveFrame(...): Received ARP_REPLY")
+					// Add Reply to arp_table regardless of whether this arp reply was solicited or unsolicited
 				      	host.arp_table[payload.SourceProtocolAddr] = payload.SourceHardwareAddr
+					// Notify host that an ARP reply was received (if it is waiting for one)
+					host.SendFrameToMatchingSessions(frame, true)
+					
 				 }
 			      }
 			      }
@@ -297,9 +388,11 @@ func (host *Host) SendFrame(frame Frame) {
 
 // TODO To allow for sessions (and anything else that requires continuity between a send and subsequent receives), there should probably be a stack of "receivers" for running processes that need to act on specific received inputs that are related to packets they sent out earlier
 // One good example of the above is when a host wants to send a packet but needs to do an ARP request first. It needs to wait for the ARP request to be returned before it can correctly address the packet it wants to send across the network
+
 func main() {
      debug_flag = flag.Bool("DEBUG", false, "a bool")
      flag.Parse()
+     
      	fmt.Println("Test 1 ======================================")
 	host_1 := NewHost(IP{10, 0, 0, 1}, MAC{0, 0, 0, 0, 0, 1})
 	go host_1.PowerOn()
@@ -341,6 +434,22 @@ func main() {
 	Connect(&(host_6.Intf), &(swt_3.Ports[0]))
 	Connect(&(swt_2.Ports[1]), &(swt_3.Ports[1]))
 	host_5.SendFrame(NewArpRequestFrame(host_5.Intf.Mac, host_5.Intf.Ip, host_6.Intf.Ip))
+	time.Sleep(100000000)
+
+
+     	fmt.Println("Test 5 (Synchronized ARP Request) ======================================")
+	host_7 := NewHost(IP{10, 0, 0, 7}, MAC{0, 0, 0, 0, 0, 7})
+	go host_7.PowerOn()
+	host_8 := NewHost(IP{10, 0, 0, 8}, MAC{0, 0, 0, 0, 0, 8})
+	go host_8.PowerOn()
+	swt_4 := NewSwitch(2)
+	go swt_4.PowerOn()
+	swt_5 := NewSwitch(2)
+	go swt_5.PowerOn()
+	Connect(&(host_7.Intf), &(swt_4.Ports[0]))
+	Connect(&(host_8.Intf), &(swt_5.Ports[0]))
+	Connect(&(swt_4.Ports[1]), &(swt_5.Ports[1]))
+	host_5.SendArpRequest(host_6.Intf.Ip)
 	time.Sleep(100000000)
 
 	return
