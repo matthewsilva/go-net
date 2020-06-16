@@ -135,6 +135,7 @@ type Interface struct {
 	Mac            MAC
 	// Denotes where this interface is connected (nil if no connection)
 	Connection   chan Frame // channels represent an ethernet connection
+				 	  		// TODO Investigate turning these channels/Frames into structs that implement the reader interface
 	Connected_to chan Frame // TODO both these channels need to be buffers to prevent deadlock
 }
 
@@ -167,6 +168,8 @@ type Host struct {
 	arp_table     map[IP]MAC // TODO Need to add mutex for arp_table
 	Sessions      []Session
 	SessionsMutex sync.Mutex
+	ConsoleInput       []string
+	ConsoleOutput       []string
 }
 
 func (host *Host) String() string {
@@ -174,7 +177,7 @@ func (host *Host) String() string {
 }
 
 func NewHost(ip IP, mask SubnetMask, default_gateway IP, mac MAC) *Host {
-	return &Host{Interface{Name: "eth0" /*TODO*/, Ip: ip, Mask: mask, DefaultGateway: default_gateway, Mac: mac, Connection: make(chan Frame), Connected_to: nil}, make(map[IP]MAC), nil, sync.Mutex{}}
+	return &Host{Interface{Name: "eth0" /*TODO*/, Ip: ip, Mask: mask, DefaultGateway: default_gateway, Mac: mac, Connection: make(chan Frame), Connected_to: nil}, make(map[IP]MAC), nil, sync.Mutex{}, nil, nil}
 }
 
 type Switch struct {
@@ -338,7 +341,9 @@ func HandleArpFrame(dev IpCapableDevice, frame Frame, receiving_intf *Interface)
 				reply := NewArpReplyFrame(receiving_intf.Mac, receiving_intf.Ip, payload.SourceHardwareAddr, payload.SourceProtocolAddr)
 				SendFrame(reply, receiving_intf)
 			case ARP_REPLY:
-				fmt.Println("ReceiveFrame(...): Received ARP_REPLY")
+				if *debug_flag {
+				   fmt.Println("ReceiveFrame(...): Received ARP_REPLY")
+				}
 				// Add Reply to arp_table regardless of whether this arp reply was solicited or unsolicited
 				(*dev.ArpTable())[payload.SourceProtocolAddr] = payload.SourceHardwareAddr
 				// Notify host that an ARP reply was received (if it is waiting for one)
@@ -461,7 +466,11 @@ func (host *Host) Ping(destIp IP) {
 	// Wait until the ARP request has been answered
 	<-echo_reply_chan // Nothing needs to be done with the output so far
 	ping_time := time.Since(send_time)
-	fmt.Println("SendArpRequest(...): Ping to", destIp, "took", ping_time)
+	ping_message := fmt.Sprint("Ping to", destIp, "took", ping_time)
+	if *debug_flag {
+	   fmt.Println("SendArpRequest(...):", ping_message)
+	}
+	host.ConsoleOutput = append(host.ConsoleOutput, ping_message)
 }
 
 func SameSubnet(ip1, ip2 IP, mask SubnetMask) bool {
@@ -674,6 +683,7 @@ func (host *Host) ReceiveIPv4Packet(containing_frame Frame, packet IPv4Packet, i
 // One good example of the above is when a host wants to send a packet but needs to do an ARP request first. It needs to wait for the ARP request to be returned before it can correctly address the packet it wants to send across the network
 
 func main() {
+	 fmt.Println("Great!")
 	return
 }
 

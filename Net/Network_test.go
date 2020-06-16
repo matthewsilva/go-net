@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,20 +24,26 @@ func TestSendArpRequestAsFrame(t *testing.T) {
 	Connect(&(host_1.Intf), &(host_2.Intf))
 	host_1.SendFrame(NewArpRequestFrame(host_1.Intf.Mac, host_1.Intf.Ip, host_2.Intf.Ip))
 	time.Sleep(100000000)
-	fmt.Println(host_1)
+	if mac, found := host_1.arp_table[host_2.Intf.Ip]; !found || mac != host_2.Intf.Mac {
+	   t.Errorf("ARP Request not resolved within 100000000 us")
+	}
 }
 
 func TestSwitches(t *testing.T) {
 	fmt.Println("Test 2 ======================================")
-	host_3 := NewHost(IP{10, 0, 0, 3}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 3})
-	go host_3.PowerOn()
-	host_4 := NewHost(IP{10, 0, 0, 4}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 4})
-	go host_4.PowerOn()
-	swt_1 := NewSwitch(4)
+	host_1 := NewHost(IP{10, 0, 0, 1}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 1})
+	go host_1.PowerOn()
+	host_2 := NewHost(IP{10, 0, 0, 2}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 2})
+	go host_2.PowerOn()
+	swt_1 := NewSwitch(2)
 	go swt_1.PowerOn()
-	Connect(&(host_3.Intf), &(swt_1.Ports[0]))
-	Connect(&(host_4.Intf), &(swt_1.Ports[1]))
-	host_3.SendFrame(NewArpRequestFrame(host_3.Intf.Mac, host_3.Intf.Ip, host_4.Intf.Ip))
+	Connect(&(host_1.Intf), &(swt_1.Ports[0]))
+	Connect(&(host_2.Intf), &(swt_1.Ports[1]))
+	host_1.SendFrame(NewArpRequestFrame(host_1.Intf.Mac, host_1.Intf.Ip, host_2.Intf.Ip))
+	time.Sleep(100000000)
+	if mac, found := host_1.arp_table[host_2.Intf.Ip]; !found || mac != host_2.Intf.Mac {
+	   t.Errorf("ARP Request not resolved within 100000000 us")
+	}
 }
 func TestSendToDisconnectedHost(t *testing.T) {
 	fmt.Println("Test 3 ======================================")
@@ -46,36 +53,47 @@ func TestSendToDisconnectedHost(t *testing.T) {
 	host_2 := NewHost(IP{10, 0, 0, 2}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 2})
 	go host_2.PowerOn()
 	host_1.SendFrame(NewArpRequestFrame(host_1.Intf.Mac, host_1.Intf.Ip, host_2.Intf.Ip))
+	time.Sleep(100000000)
+	if _, found := host_1.arp_table[host_2.Intf.Ip]; found {
+	   t.Errorf("ARP Request resolved with disconnected host")
+	}
 }
 func TestMultipleSwitches(t *testing.T) {
 	fmt.Println("Test 4 (Two Switches) ======================================")
-	host_5 := NewHost(IP{10, 0, 0, 5}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 5})
-	go host_5.PowerOn()
-	host_6 := NewHost(IP{10, 0, 0, 6}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 6})
-	go host_6.PowerOn()
+	host_1 := NewHost(IP{10, 0, 0, 1}, SubnetMask{211, 211, 211, 0}, IP{10, 0, 0, 211}, MAC{0, 0, 0, 0, 0, 1})
+	go host_1.PowerOn()
+	host_2 := NewHost(IP{10, 0, 0, 2}, SubnetMask{211, 211, 211, 0}, IP{10, 0, 0, 211}, MAC{0, 0, 0, 0, 0, 2})
+	go host_2.PowerOn()
 	swt_2 := NewSwitch(2)
 	go swt_2.PowerOn()
 	swt_3 := NewSwitch(2)
 	go swt_3.PowerOn()
-	Connect(&(host_5.Intf), &(swt_2.Ports[0]))
-	Connect(&(host_6.Intf), &(swt_3.Ports[0]))
+	Connect(&(host_1.Intf), &(swt_2.Ports[0]))
+	Connect(&(host_2.Intf), &(swt_3.Ports[0]))
 	Connect(&(swt_2.Ports[1]), &(swt_3.Ports[1]))
-	host_5.SendFrame(NewArpRequestFrame(host_5.Intf.Mac, host_5.Intf.Ip, host_6.Intf.Ip))
+	host_1.SendFrame(NewArpRequestFrame(host_1.Intf.Mac, host_1.Intf.Ip, host_2.Intf.Ip))
+	time.Sleep(100000000)
+	if mac, found := host_1.arp_table[host_2.Intf.Ip]; !found || mac != host_2.Intf.Mac {
+	   t.Errorf("ARP Request not resolved within 100000000 us")
+	}
 }
 func TestSendArpRequest(t *testing.T) {
 	fmt.Println("Test 5 (Synchronized ARP Request) ======================================")
-	host_7 := NewHost(IP{10, 0, 0, 7}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 7})
-	go host_7.PowerOn()
-	host_8 := NewHost(IP{10, 0, 0, 8}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 8})
-	go host_8.PowerOn()
+	host_1 := NewHost(IP{10, 0, 0, 1}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 1})
+	go host_1.PowerOn()
+	host_2 := NewHost(IP{10, 0, 0, 2}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 2})
+	go host_2.PowerOn()
 	swt_4 := NewSwitch(2)
 	go swt_4.PowerOn()
 	swt_5 := NewSwitch(2)
 	go swt_5.PowerOn()
-	Connect(&(host_7.Intf), &(swt_4.Ports[0]))
-	Connect(&(host_8.Intf), &(swt_5.Ports[0]))
+	Connect(&(host_1.Intf), &(swt_4.Ports[0]))
+	Connect(&(host_2.Intf), &(swt_5.Ports[0]))
 	Connect(&(swt_4.Ports[1]), &(swt_5.Ports[1]))
-	SendArpRequest(host_8.Intf.Ip, host_7, &(host_7.Intf))
+	SendArpRequest(host_2.Intf.Ip, host_1, &(host_1.Intf))
+	if mac, found := host_1.arp_table[host_2.Intf.Ip]; !found || mac != host_2.Intf.Mac {
+	   t.Errorf("ARP Request not resolved")
+	}
 }
 func TestPingOnLAN(t *testing.T) {
 	fmt.Println("Test 6 (Echo Request / Ping) ======================================")
@@ -91,7 +109,17 @@ func TestPingOnLAN(t *testing.T) {
 	Connect(&(host_10.Intf), &(swt_7.Ports[0]))
 	Connect(&(swt_6.Ports[1]), &(swt_7.Ports[1]))
 	host_9.Ping(host_10.Intf.Ip)
-	host_9.Ping(host_10.Intf.Ip)
+	ping_message := fmt.Sprint("Ping to", host_10.Intf.Ip, "took")
+	ping_found := false
+	for _, output := range host_9.ConsoleOutput {
+		if strings.Contains(output, ping_message) {
+		   ping_found = true
+		   break
+		}
+	}
+	if !ping_found {
+   	   t.Error("Ping not found in host's ConsoleOutput (", host_9.ConsoleOutput,")")
+	}
 }
 func TestPingThroughRouter(t *testing.T) {
 	fmt.Println("Test 7 (Echo Request / Ping On Different Subnet) ======================================")
@@ -110,4 +138,15 @@ func TestPingThroughRouter(t *testing.T) {
 	Connect(&(swt_8.Ports[1]), &(router_1.Ports[0]))
 	Connect(&(swt_9.Ports[1]), &(router_1.Ports[1]))
 	host_11.Ping(host_12.Intf.Ip)
+	ping_message := fmt.Sprint("Ping to", host_12.Intf.Ip, "took")
+	ping_found := false
+	for _, output := range host_11.ConsoleOutput {
+		if strings.Contains(output, ping_message) {
+		   ping_found = true
+		   break
+		}
+	}
+	if !ping_found {
+   	   t.Error("Ping not found in host's ConsoleOutput (", host_11.ConsoleOutput,")")
+	}
 }
