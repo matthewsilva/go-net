@@ -13,6 +13,7 @@ import (
 var debug_flag *bool
 
 type IP [4]uint8
+type SubnetMask [4]uint8
 
 func (ip IP) String() string {
 	var output string = ""
@@ -57,38 +58,41 @@ type ARPPayload struct {
 }
 
 type IPv4Protocol uint8
+
 const (
-      ICMP IPv4Protocol = 0x01
-      TCP IPv4Protocol = 0x06
-      UDP IPv4Protocol = 0x11
+	ICMP IPv4Protocol = 0x01
+	TCP  IPv4Protocol = 0x06
+	UDP  IPv4Protocol = 0x11
 )
+
 type IPv4Packet struct {
-     VersionAndIHL uint8
-     DSCPandECN uint8
-     TotalLength uint16
-     Identification uint16
-     FlagsAndFragmentOffset uint16
-     TimeToLive uint8 // TODO See https://en.wikipedia.org/wiki/IPv4#TTL (This means that every single packet sent that expects a response should also expect an ICMP Time Exceeded message. This can be done by including it in the lambda function that the Session is created with)
-	 // TODO Alternatively, golang timers could be used to automatically notify on a the channel after a set amount of time (https://gobyexample.com/timers). These could be set up by the waiting program before beginning to wait on the channel such that there would be a guarantee that they would come out of the wait eventually. Be sure to devise a way to know whether the channel actually received a response or just timed out and got a phony timer response
-     Protocol IPv4Protocol
-     HeaderChecksum uint16
-     SourceIp IP
-     DestIp IP
-     Data interface{}
+	VersionAndIHL          uint8
+	DSCPandECN             uint8
+	TotalLength            uint16
+	Identification         uint16
+	FlagsAndFragmentOffset uint16
+	TimeToLive             uint8 // TODO See https://en.wikipedia.org/wiki/IPv4#TTL (This means that every single packet sent that expects a response should also expect an ICMP Time Exceeded message. This can be done by including it in the lambda function that the Session is created with)
+	// TODO Alternatively, golang timers could be used to automatically notify on a the channel after a set amount of time (https://gobyexample.com/timers). These could be set up by the waiting program before beginning to wait on the channel such that there would be a guarantee that they would come out of the wait eventually. Be sure to devise a way to know whether the channel actually received a response or just timed out and got a phony timer response
+	Protocol       IPv4Protocol
+	HeaderChecksum uint16
+	SourceIp       IP
+	DestIp         IP
+	Data           interface{}
 }
 
 type ICMPType uint8
+
 const (
-      EchoReply ICMPType = 0
-      DestinationUnreachable ICMPType = 3
-      EchoRequest ICMPType = 8
-      // TODO TimeExceeded ICMPType = 11
+	EchoReply              ICMPType = 0
+	DestinationUnreachable ICMPType = 3
+	EchoRequest            ICMPType = 8
+	// TODO TimeExceeded ICMPType = 11
 )
 
 type ICMPDatagram struct {
-     PacketType  ICMPType
-     ICMPCode uint8
-     Checksum uint16
+	PacketType ICMPType
+	ICMPCode   uint8
+	Checksum   uint16
 }
 
 type EtherType uint16
@@ -116,7 +120,7 @@ func (frame Frame) String() string {
 			str += fmt.Sprintf("ARPPayload{OperationType: %v}", payload.OperationType)
 		}
 	case IPv4:
-		 str += fmt.Sprintf("IPv4Packet{TODO, Show contents / packet type}")
+		str += fmt.Sprintf("IPv4Packet{TODO, Show contents / packet type}")
 	default:
 		str += "Error:Unknown ethertype"
 	}
@@ -125,9 +129,11 @@ func (frame Frame) String() string {
 }
 
 type Interface struct {
-	Name string
-	Ip   IP
-	Mac  MAC
+	Name           string
+	Ip             IP
+	Mask           SubnetMask
+	DefaultGateway IP
+	Mac            MAC
 	// Denotes where this interface is connected (nil if no connection)
 	Connection   chan Frame // channels represent an ethernet connection
 	Connected_to chan Frame // TODO both these channels need to be buffers to prevent deadlock
@@ -159,7 +165,7 @@ type Host struct {
 	// TODO Need list of interfaces
 	// TODO add hostname
 	Intf          Interface
-	arp_table     map[IP]MAC
+	arp_table     map[IP]MAC // TODO Need to add mutex for arp_table
 	Sessions      []Session
 	SessionsMutex sync.Mutex
 }
@@ -168,8 +174,8 @@ func (host *Host) String() string {
 	return host.Intf.String() + "," + fmt.Sprint(host.arp_table)
 }
 
-func NewHost(ip IP, mac MAC) *Host {
-	return &Host{Interface{"eth0" /*TODO*/, ip, mac, make(chan Frame), nil}, make(map[IP]MAC), nil, sync.Mutex{}}
+func NewHost(ip IP, mask SubnetMask, default_gateway IP, mac MAC) *Host {
+	return &Host{Interface{Name: "eth0" /*TODO*/, Ip: ip, Mask: mask, DefaultGateway: default_gateway, Mac: mac, Connection: make(chan Frame), Connected_to: nil}, make(map[IP]MAC), nil, sync.Mutex{}}
 }
 
 type Switch struct {
@@ -186,7 +192,7 @@ func NewSwitch(ports int) *Switch {
 		ip := IP{0, 0, 0, 0} /*TODO*/
 		mac := MAC{uint8(rand.Intn(256)), uint8(rand.Intn(256)), uint8(rand.Intn(256)), uint8(rand.Intn(256)), uint8(rand.Intn(256)), uint8(rand.Intn(256))}
 
-		swt.Ports[i] = Interface{"eth0" /*TODO*/, ip, mac, make(chan Frame), nil}
+		swt.Ports[i] = Interface{Name: "eth0" /*TODO*/, Ip: ip, Mac: mac, Connection: make(chan Frame), Connected_to: nil}
 	}
 	swt.Mac_table = make(map[MAC]int)
 	return &swt
@@ -225,6 +231,150 @@ func (swt *Switch) SendFrame(frame Frame, recv_port_num int) {
 			}
 		}
 	}
+}
+
+type Router struct {
+	Name          string
+	Ports         []Interface
+	arp_table     map[IP]MAC
+	Routing_table int // TODO
+	Sessions      []Session
+	SessionsMutex sync.Mutex
+}
+
+func NewInterface(mac MAC, ip IP) Interface {
+	return Interface{Name: "eth0" /*TODO*/, Ip: ip, Mac: mac, Connection: make(chan Frame), Connected_to: nil}
+}
+
+func NewRouter(num_ports int, ip_list []IP, mask_list []SubnetMask, mac_list []MAC) *Router {
+	var router Router
+	router.Name = "router_0"
+	router.Ports = make([]Interface, num_ports)
+	for i := range router.Ports {
+		ip := ip_list[i]
+		mask := mask_list[i]
+		mac := mac_list[i]
+		router.Ports[i] = Interface{Name: "eth0" /*TODO*/, Ip: ip, Mask: mask, Mac: mac, Connection: make(chan Frame), Connected_to: nil}
+	}
+	router.arp_table = make(map[IP]MAC)
+	return &router
+}
+
+func (router *Router) PowerOn() {
+	var cases []reflect.SelectCase = make([]reflect.SelectCase, len(router.Ports))
+	for i := range router.Ports {
+		cases[i] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(router.Ports[i].Connection)}
+	}
+
+	for {
+		// reflect select
+		port_num, recv_frame, _ := reflect.Select(cases)
+		// ReceiveFrame must be run as a goroutine because there may be blocking calls initiated by the received frame
+		// that require another incoming frame to stop blocking (e.g. ReceiveFrame may initiate an ARP request)
+		go ReceiveFrame(router, recv_frame.Interface().(Frame), &(router.Ports[port_num]))
+	}
+}
+
+func (router *Router) ReceiveIPv4Packet(frame Frame, packet IPv4Packet, receiving_intf *Interface) {
+	// Rudimentary automatic routing (Only allows directly connected networks to connect)
+	// TODO This will not work if we have two routers in series, Need to add routing table
+	if packet.DestIp != receiving_intf.Ip {
+		for i := range router.Ports {
+			if SameSubnet(router.Ports[i].Ip, packet.DestIp, router.Ports[i].Mask) {
+				router.SendPacket(packet, &(router.Ports[i]))
+			}
+		}
+		//router.SendPacket(packet, default_route_intf)
+	} else {
+	}
+
+}
+
+func (router *Router) SendPacket(packet IPv4Packet, sourceIntf *Interface) {
+
+	if _, found := router.arp_table[packet.DestIp]; !found {
+		if *debug_flag {
+			fmt.Println("SendPacket(...): Router", router, "sending ARP Request...")
+		}
+		SendArpRequest(packet.DestIp, router, sourceIntf)
+		if *debug_flag {
+			fmt.Println("SendPacket(...): Router", router, "received ARP Reply...")
+		}
+	}
+	if mac, found := router.arp_table[packet.DestIp]; found {
+		SendFrame(Frame{destMac: mac, sourceMac: sourceIntf.Mac, etherType: IPv4, payload: FramePayload{packet}}, sourceIntf)
+	} else {
+		fmt.Println("SendPacket(...): The ARP Request probably timed out, no MAC address found for destination IP")
+	}
+}
+
+type IpCapableDevice interface {
+	// The below four methods allow us to reuse ARP code for both hosts and routers
+	ArpTable() *map[IP]MAC
+	GetSessions() *[]Session
+	SetSessions([]Session)
+	GetSessionsMutex() *sync.Mutex
+
+	// Routers and hosts will use mostly different code for receiving non-ARP packets
+	ReceiveIPv4Packet(frame Frame, packet IPv4Packet, receiving_intf *Interface) // TODO
+}
+
+func (router *Router) ArpTable() *map[IP]MAC          { return &(router.arp_table) }
+func (router *Router) GetSessions() *[]Session        { return &(router.Sessions) }
+func (router *Router) SetSessions(sessions []Session) { router.Sessions = sessions }
+func (router *Router) GetSessionsMutex() *sync.Mutex  { return &(router.SessionsMutex) }
+func (host *Host) ArpTable() *map[IP]MAC              { return &(host.arp_table) }
+func (host *Host) GetSessions() *[]Session            { return &(host.Sessions) }
+func (host *Host) SetSessions(sessions []Session)     { host.Sessions = sessions }
+func (host *Host) GetSessionsMutex() *sync.Mutex      { return &(host.SessionsMutex) }
+
+func HandleArpFrame(dev IpCapableDevice, frame Frame, receiving_intf *Interface) {
+	if payload, correct_type := frame.payload.Data.(ARPPayload); !correct_type {
+		fmt.Printf("ReceiveFrame(...): Error, FramePayload was incorrect type %t\n", frame.payload.Data)
+	} else {
+		if payload.DestProtocolAddr == receiving_intf.Ip {
+			switch payload.OperationType {
+			case ARP_REQUEST:
+				(*dev.ArpTable())[payload.SourceProtocolAddr] = payload.SourceHardwareAddr
+				reply := NewArpReplyFrame(receiving_intf.Mac, receiving_intf.Ip, payload.SourceHardwareAddr, payload.SourceProtocolAddr)
+				SendFrame(reply, receiving_intf)
+			case ARP_REPLY:
+				fmt.Println("ReceiveFrame(...): Received ARP_REPLY")
+				// Add Reply to arp_table regardless of whether this arp reply was solicited or unsolicited
+				(*dev.ArpTable())[payload.SourceProtocolAddr] = payload.SourceHardwareAddr
+				// Notify host that an ARP reply was received (if it is waiting for one)
+				SendFrameToMatchingSessions(dev, frame, true)
+			}
+		}
+	}
+}
+
+// TODO Need to modularize the ReceiveFrame method to reduce ARP code duplication between hosts and routers.
+// Every interface on a router needs to have its own ARP table, so maybe there could just be an update ARP table method that takes
+// an interface and an ARP frame
+func ReceiveFrame(dev IpCapableDevice, frame Frame, receiving_intf *Interface) {
+	if *debug_flag {
+		fmt.Println("ReceiveFrame(...): Device", dev, "receiving frame", frame)
+	}
+	if frame.destMac == receiving_intf.Mac || frame.destMac == broadcast_mac {
+		switch frame.etherType {
+		case ARP: // Put each case into its own method
+			if *debug_flag {
+				fmt.Println("ReceiveFrame(...): Receiving ARP frame...")
+			}
+			HandleArpFrame(dev, frame, receiving_intf)
+		case IPv4:
+			if packet, correct_type := frame.payload.Data.(IPv4Packet); !correct_type {
+				fmt.Printf("ReceiveFrame(...): Error, FramePayload was incorrect type for EtherType of %v\n", frame.etherType)
+			} else {
+				if *debug_flag {
+					fmt.Println("ReceiveFrame(...): Received Frame with IPv4 Payload")
+				}
+				dev.ReceiveIPv4Packet(frame, packet, receiving_intf)
+			}
+		}
+	}
+
 }
 
 // This is a meta function that allows the user to simulate
@@ -278,28 +428,28 @@ type Packet struct {
 }
 
 func NewICMPEchoRequest(destIp IP, sourceIp IP) IPv4Packet {
-     return NewICMPPacket(destIp, sourceIp, EchoRequest)
+	return NewICMPPacket(destIp, sourceIp, EchoRequest)
 }
 func NewICMPEchoReply(destIp IP, sourceIp IP) IPv4Packet {
-     return NewICMPPacket(destIp, sourceIp, EchoReply)
+	return NewICMPPacket(destIp, sourceIp, EchoReply)
 }
 func NewICMPPacket(destIp, sourceIp IP, icmpType ICMPType) IPv4Packet {
-     var packet IPv4Packet = IPv4Packet{Protocol: ICMP, SourceIp: sourceIp, DestIp: destIp, Data:ICMPDatagram{PacketType: icmpType}}
-     return packet
+	var packet IPv4Packet = IPv4Packet{Protocol: ICMP, SourceIp: sourceIp, DestIp: destIp, Data: ICMPDatagram{PacketType: icmpType}}
+	return packet
 }
 
 func (host *Host) Ping(destIp IP) {
 	var echo_reply_chan chan Frame = make(chan Frame)
 	icmp_request_session := Session{
 		func(frame Frame) bool {
-			if payload, payload_type_good := frame.payload.Data.(IPv4Packet);	payload_type_good &&
-			payload.Protocol == ICMP &&
-			payload.SourceIp == destIp &&
-			payload.DestIp == host.Intf.Ip {
-			   if icmp_datagram, data_type_good := payload.Data.(ICMPDatagram); data_type_good &&
-			   icmp_datagram.PacketType == EchoReply {
-			   return true
-			   } 			 
+			if payload, payload_type_good := frame.payload.Data.(IPv4Packet); payload_type_good &&
+				payload.Protocol == ICMP &&
+				payload.SourceIp == destIp &&
+				payload.DestIp == host.Intf.Ip {
+				if icmp_datagram, data_type_good := payload.Data.(ICMPDatagram); data_type_good &&
+					icmp_datagram.PacketType == EchoReply {
+					return true
+				}
 			}
 			return false
 		},
@@ -308,70 +458,88 @@ func (host *Host) Ping(destIp IP) {
 	host.Sessions = append(host.Sessions, icmp_request_session) // A session is composed of a Frame comparison function and a channel to notify on if that function returns true
 	host.SessionsMutex.Unlock()
 	send_time := time.Now()
-    host.SendPacket(NewICMPEchoRequest(destIp, host.Intf.Ip))
+	host.SendPacket(NewICMPEchoRequest(destIp, host.Intf.Ip))
 	// Wait until the ARP request has been answered
 	<-echo_reply_chan // Nothing needs to be done with the output so far
 	ping_time := time.Since(send_time)
 	fmt.Println("SendArpRequest(...): Ping to", destIp, "took", ping_time)
 }
 
+func SameSubnet(ip1, ip2 IP, mask SubnetMask) bool {
+	for i := range ip1 {
+		if ip1[i]&mask[i] != ip2[i]&mask[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (host *Host) SendPacket(packet IPv4Packet) {
 
-/* If you want to send a packet, to a particular IP address, you have to first know the MAC Address.
-   If the MAC for the destination IP is not in the routing table, we need to send out an ARP request
-   and wait on the reply (this implies that SendPacket must have a way to wait for the return of the ARP Reply...)
-   Then, after receiving the reply, a regular frame gets sent to the destination using SendFrame
+	/* If you want to send a packet, to a particular IP address, you have to first know the MAC Address.
+	   If the MAC for the destination IP is not in the routing table, we need to send out an ARP request
+	   and wait on the reply (this implies that SendPacket must have a way to wait for the return of the ARP Reply...)
+	   Then, after receiving the reply, a regular frame gets sent to the destination using SendFrame
 
-   Best approach for doing this would be adding a slice of "open sessions" to the host, and determining if incoming
-   frames / packets are meant to be received by any of the open sessions. The open session would then be activated
-   for further processing, probably passing the the relevant frame/packet to the open session. A channel would be a
-   very natural way of representing this because it would allow for both synchronization between the open session
-   resuming processing (e.g. after an ARP reply came in) as well as the transfer of the required data for that
-   processing (e.g the ARP reply itself). Granted, for the current ARP application, the method for receiving Frames
-   from a channel already processes those ARP replies and modifies the ARP table. At least for this application,
-   specifically, the only synchronization required would be to have an ARP request wait for the completion of the
-   current processing of the ARP packet. Not sure if the design could be improved by moving this processing into
-   the areas where the response needs to be waited on. However, it might be really hard to implement TCP sessions?
-   We will see... Maybe TCP can just be a slice of TCP sessions on the host?
-*/
-     if _, found := host.arp_table[packet.DestIp]; !found {
-       if *debug_flag {fmt.Println("SendPacket(...): Host", host, "sending ARP Request...")}
-	host.SendArpRequest(packet.DestIp)
-       if *debug_flag {fmt.Println("SendPacket(...): Host", host, "received ARP Reply...")}
-     }
-     if mac, found := host.arp_table[packet.DestIp]; found {
-          host.SendFrame(Frame{destMac: mac, sourceMac: host.Intf.Mac, etherType:IPv4, payload:FramePayload{packet}})
-     } else {
-       fmt.Println("SendPacket(...): The ARP Request probably timed out, no MAC address found for destination IP")
-     }
+	   Best approach for doing this would be adding a slice of "open sessions" to the host, and determining if incoming
+	   frames / packets are meant to be received by any of the open sessions. The open session would then be activated
+	   for further processing, probably passing the the relevant frame/packet to the open session. A channel would be a
+	   very natural way of representing this because it would allow for both synchronization between the open session
+	   resuming processing (e.g. after an ARP reply came in) as well as the transfer of the required data for that
+	   processing (e.g the ARP reply itself). Granted, for the current ARP application, the method for receiving Frames
+	   from a channel already processes those ARP replies and modifies the ARP table. At least for this application,
+	   specifically, the only synchronization required would be to have an ARP request wait for the completion of the
+	   current processing of the ARP packet. Not sure if the design could be improved by moving this processing into
+	   the areas where the response needs to be waited on. However, it might be really hard to implement TCP sessions?
+	   We will see... Maybe TCP can just be a slice of TCP sessions on the host?
+	*/
+	var NextHopIp IP = packet.DestIp
+	if !SameSubnet(host.Intf.Ip, packet.DestIp, host.Intf.Mask) {
+		NextHopIp = host.Intf.DefaultGateway
+		if *debug_flag {
+			fmt.Println("SendPacket(...): Sending packet to default gateway...")
+		}
+	}
+	if _, found := host.arp_table[NextHopIp]; !found {
+		if *debug_flag {
+			fmt.Println("SendPacket(...): Host", host, "sending ARP Request...")
+		}
+		SendArpRequest(NextHopIp, host, &(host.Intf))
+		if *debug_flag {
+			fmt.Println("SendPacket(...): Host", host, "received ARP Reply...")
+		}
+	}
+	if mac, found := host.arp_table[NextHopIp]; found {
+		SendFrame(Frame{destMac: mac, sourceMac: host.Intf.Mac, etherType: IPv4, payload: FramePayload{packet}}, &(host.Intf))
+	} else {
+		fmt.Println("SendPacket(...): The ARP Request probably timed out, no MAC address found for destination IP")
+	}
 
 }
 
-
-func (host *Host) SendArpRequest(destIp IP) {
+func SendArpRequest(destIp IP, dev IpCapableDevice, sourceIntf *Interface) {
 	var arp_reply_chan chan Frame = make(chan Frame)
 	arp_request_session := Session{
 		func(frame Frame) bool {
-			if payload, correct_type := frame.payload.Data.(ARPPayload); frame.destMac == host.Intf.Mac && correct_type &&
+			if payload, correct_type := frame.payload.Data.(ARPPayload); frame.destMac == sourceIntf.Mac && correct_type &&
 				payload.SourceProtocolAddr == destIp &&
-				payload.DestProtocolAddr == host.Intf.Ip &&
-				payload.DestHardwareAddr == host.Intf.Mac {
+				payload.DestProtocolAddr == sourceIntf.Ip &&
+				payload.DestHardwareAddr == sourceIntf.Mac {
 				return true
 			} else {
 				return false
 			}
 		},
 		arp_reply_chan}
-	host.SessionsMutex.Lock()
-	host.Sessions = append(host.Sessions, arp_request_session) // A session is composed of a Frame comparison function and a channel to notify on if that function returns true
-	host.SessionsMutex.Unlock()
-	host.SendFrame(NewArpRequestFrame(host.Intf.Mac, host.Intf.Ip, destIp))
+	dev.GetSessionsMutex().Lock()
+	dev.SetSessions(append((*dev.GetSessions()), arp_request_session)) // A session is composed of a Frame comparison function and a channel to notify on if that function returns true
+	dev.GetSessionsMutex().Unlock()
+	SendFrame(NewArpRequestFrame(sourceIntf.Mac, sourceIntf.Ip, destIp), sourceIntf)
 	// Wait until the ARP request has been answered
 	<-arp_reply_chan // Nothing needs to be done with the output frame from the channel because ARP replies get handled automatically in ReceiveFrame such that we are able to accomodate unsolicited ARP announcements
 	if *debug_flag {
 		fmt.Println("SendArpRequest(...): Received ARP Reply frame from Channel")
 	}
-
 }
 
 func RemoveFrameFromSlice(slice []Session, index_to_remove int) []Session {
@@ -379,18 +547,20 @@ func RemoveFrameFromSlice(slice []Session, index_to_remove int) []Session {
 	return slice
 }
 
-func (host *Host) SendFrameToMatchingSessions(frame Frame, removeSessions bool) {
-	host.SessionsMutex.Lock()
-	for i, session := range host.Sessions {
+func SendFrameToMatchingSessions(dev IpCapableDevice, frame Frame, removeSessions bool) {
+	dev.GetSessionsMutex().Lock()
+	for i, session := range *dev.GetSessions() {
 		if session.IsMatchingFrame(frame) {
-		    if *debug_flag {fmt.Println("SendFrameToMatchingSessions(...): Sending frame to matching channel")}
+			if *debug_flag {
+				fmt.Println("SendFrameToMatchingSessions(...): Sending frame to matching channel")
+			}
 			session.Response <- frame
 			if removeSessions {
-				host.Sessions = RemoveFrameFromSlice(host.Sessions, i)
+				dev.SetSessions(RemoveFrameFromSlice((*dev.GetSessions()), i))
 			}
 		}
 	}
-	host.SessionsMutex.Unlock()
+	dev.GetSessionsMutex().Unlock()
 }
 
 /*
@@ -420,10 +590,13 @@ func (host *Host) PowerOn() {
 	for {
 		// reflect select
 		_, recv_frame, _ := reflect.Select(cases)
-		host.ReceiveFrame(recv_frame.Interface().(Frame), &(host.Intf))
+		// ReceiveFrame must be run as a goroutine because there may be blocking calls initiated by the received frame
+		// that require another incoming frame to stop blocking (e.g. ReceiveFrame may initiate an ARP request)
+		go ReceiveFrame(host, recv_frame.Interface().(Frame), &(host.Intf))
 	}
 }
 
+/*
 func (host *Host) ReceiveFrame(frame Frame, intf *Interface) {
 	if host != nil {
 		if *debug_flag {
@@ -432,37 +605,30 @@ func (host *Host) ReceiveFrame(frame Frame, intf *Interface) {
 		if frame.destMac == host.Intf.Mac || frame.destMac == broadcast_mac {
 			switch frame.etherType {
 			case ARP: // Put each case into its own method
-				if payload, correct_type := frame.payload.Data.(ARPPayload); !correct_type {
-					fmt.Printf("ReceiveFrame(...): Error, FramePayload was incorrect type %t\n", frame.payload.Data)
-				} else {
-					if payload.DestProtocolAddr == host.Intf.Ip {
-						switch payload.OperationType {
-						case ARP_REQUEST:
-							host.arp_table[payload.SourceProtocolAddr] = payload.SourceHardwareAddr
-							reply := NewArpReplyFrame(host.Intf.Mac, host.Intf.Ip, payload.SourceHardwareAddr, payload.SourceProtocolAddr)
-							host.SendFrame(reply)
-						case ARP_REPLY:
-							fmt.Println("ReceiveFrame(...): Received ARP_REPLY")
-							// Add Reply to arp_table regardless of whether this arp reply was solicited or unsolicited
-							host.arp_table[payload.SourceProtocolAddr] = payload.SourceHardwareAddr
-							// Notify host that an ARP reply was received (if it is waiting for one)
-							host.SendFrameToMatchingSessions(frame, true)
-
-						}
-					}
-				}
+				HandleArpFrame(host, frame, intf)
 			case IPv4:
 				if packet, correct_type := frame.payload.Data.(IPv4Packet); !correct_type {
 					fmt.Printf("ReceiveFrame(...): Error, FramePayload was incorrect type for EtherType of %v\n", frame.etherType)
 				} else {
-				  if *debug_flag {fmt.Println("ReceiveFrame(...): Received Frame with IPv4 Payload")}
-			      host.ReceiveIPv4Packet(frame, packet, intf)
+					if *debug_flag {
+						fmt.Println("ReceiveFrame(...): Received Frame with IPv4 Payload")
+					}
+					host.ReceiveIPv4Packet(frame, packet, intf)
 				}
 			}
 		}
 	}
 }
+*/
+func SendFrame(frame Frame, intf *Interface) {
+	if *debug_flag {
+		fmt.Println("SendFrame(...): Sending frame", frame)
+	}
+	// Send the frame out of our interface to wherever our interface is connected to
+	intf.Send(frame)
+}
 
+// Convenience method for hosts since they only have one interface
 func (host *Host) SendFrame(frame Frame) {
 	if host != nil {
 		if *debug_flag {
@@ -473,29 +639,33 @@ func (host *Host) SendFrame(frame Frame) {
 	}
 }
 
-func (host *Host) ReceiveIPv4Packet(containing_frame Frame,packet IPv4Packet, intf *Interface) {
-	 if packet.DestIp == intf.Ip {
-	 	switch packet.Protocol {
+func (host *Host) ReceiveIPv4Packet(containing_frame Frame, packet IPv4Packet, intf *Interface) {
+	if packet.DestIp == intf.Ip {
+		switch packet.Protocol {
 		case ICMP:
-		   if icmp_datagram, data_type_good := packet.Data.(ICMPDatagram); data_type_good {
-		   	  switch icmp_datagram.PacketType {
-		   	  case EchoReply:
-			  	if *debug_flag {fmt.Println("ReceiveIPv4Packet(...): Received ICMP echo reply")}
-		   		// Notify host that a reply to an echo request was received (if it is waiting for one)
-				host.SendFrameToMatchingSessions(containing_frame, true)
-				
-				case EchoRequest:
-			  	if *debug_flag {fmt.Println("ReceiveIPv4Packet(...): Received ICMP echo request")}
-				
-				 // Send a response back to the host
-	  	    	 host.SendPacket(NewICMPEchoReply(packet.SourceIp, host.Intf.Ip))
+			if icmp_datagram, data_type_good := packet.Data.(ICMPDatagram); data_type_good {
+				switch icmp_datagram.PacketType {
+				case EchoReply:
+					if *debug_flag {
+						fmt.Println("ReceiveIPv4Packet(...): Received ICMP echo reply")
+					}
+					// Notify host that a reply to an echo request was received (if it is waiting for one)
+					SendFrameToMatchingSessions(host, containing_frame, true)
 
-				 default:
-				 fmt.Println("ReceiveIPv4Packet(...): Unknown Protocol type", packet.Protocol,"in IPv4Packet")
-				 }
+				case EchoRequest:
+					if *debug_flag {
+						fmt.Println("ReceiveIPv4Packet(...): Received ICMP echo request")
+					}
+
+					// Send a response back to the host
+					host.SendPacket(NewICMPEchoReply(packet.SourceIp, host.Intf.Ip))
+
+				default:
+					fmt.Println("ReceiveIPv4Packet(...): Unknown Protocol type", packet.Protocol, "in IPv4Packet")
+				}
 			}
-	 	}
-	 }
+		}
+	}
 }
 
 // TODO Everything more above and including an ARP request should probably be run in parallel because it needs to wait on the response after sending (Unless that logic can be worked into the ReceiveFrame method)
@@ -509,9 +679,9 @@ func main() {
 	flag.Parse()
 
 	fmt.Println("Test 1 ======================================")
-	host_1 := NewHost(IP{10, 0, 0, 1}, MAC{0, 0, 0, 0, 0, 1})
+	host_1 := NewHost(IP{10, 0, 0, 1}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 1})
 	go host_1.PowerOn()
-	host_2 := NewHost(IP{10, 0, 0, 2}, MAC{0, 0, 0, 0, 0, 2})
+	host_2 := NewHost(IP{10, 0, 0, 2}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 2})
 	go host_2.PowerOn()
 	Connect(&(host_1.Intf), &(host_2.Intf))
 	host_1.SendFrame(NewArpRequestFrame(host_1.Intf.Mac, host_1.Intf.Ip, host_2.Intf.Ip))
@@ -520,9 +690,9 @@ func main() {
 	time.Sleep(100000000)
 
 	fmt.Println("Test 2 ======================================")
-	host_3 := NewHost(IP{10, 0, 0, 3}, MAC{0, 0, 0, 0, 0, 3})
+	host_3 := NewHost(IP{10, 0, 0, 3}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 3})
 	go host_3.PowerOn()
-	host_4 := NewHost(IP{10, 0, 0, 4}, MAC{0, 0, 0, 0, 0, 4})
+	host_4 := NewHost(IP{10, 0, 0, 4}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 4})
 	go host_4.PowerOn()
 	swt_1 := NewSwitch(4)
 	go swt_1.PowerOn()
@@ -537,9 +707,9 @@ func main() {
 	time.Sleep(100000000)
 
 	fmt.Println("Test 4 (Two Switches) ======================================")
-	host_5 := NewHost(IP{10, 0, 0, 5}, MAC{0, 0, 0, 0, 0, 5})
+	host_5 := NewHost(IP{10, 0, 0, 5}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 5})
 	go host_5.PowerOn()
-	host_6 := NewHost(IP{10, 0, 0, 6}, MAC{0, 0, 0, 0, 0, 6})
+	host_6 := NewHost(IP{10, 0, 0, 6}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 6})
 	go host_6.PowerOn()
 	swt_2 := NewSwitch(2)
 	go swt_2.PowerOn()
@@ -552,9 +722,9 @@ func main() {
 	time.Sleep(100000000)
 
 	fmt.Println("Test 5 (Synchronized ARP Request) ======================================")
-	host_7 := NewHost(IP{10, 0, 0, 7}, MAC{0, 0, 0, 0, 0, 7})
+	host_7 := NewHost(IP{10, 0, 0, 7}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 7})
 	go host_7.PowerOn()
-	host_8 := NewHost(IP{10, 0, 0, 8}, MAC{0, 0, 0, 0, 0, 8})
+	host_8 := NewHost(IP{10, 0, 0, 8}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 8})
 	go host_8.PowerOn()
 	swt_4 := NewSwitch(2)
 	go swt_4.PowerOn()
@@ -563,13 +733,13 @@ func main() {
 	Connect(&(host_7.Intf), &(swt_4.Ports[0]))
 	Connect(&(host_8.Intf), &(swt_5.Ports[0]))
 	Connect(&(swt_4.Ports[1]), &(swt_5.Ports[1]))
-	host_7.SendArpRequest(host_8.Intf.Ip)
+	SendArpRequest(host_8.Intf.Ip, host_7, &(host_7.Intf))
 	time.Sleep(100000000)
-	
+
 	fmt.Println("Test 6 (Echo Request / Ping) ======================================")
-	host_9 := NewHost(IP{10, 0, 0, 9}, MAC{0, 0, 0, 0, 0, 9})
+	host_9 := NewHost(IP{10, 0, 0, 9}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 9})
 	go host_9.PowerOn()
-	host_10 := NewHost(IP{10, 0, 0, 10}, MAC{0, 0, 0, 0, 0, 10})
+	host_10 := NewHost(IP{10, 0, 0, 10}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 10})
 	go host_10.PowerOn()
 	swt_6 := NewSwitch(2)
 	go swt_6.PowerOn()
@@ -579,13 +749,29 @@ func main() {
 	Connect(&(host_10.Intf), &(swt_7.Ports[0]))
 	Connect(&(swt_6.Ports[1]), &(swt_7.Ports[1]))
 	host_9.Ping(host_10.Intf.Ip)
+	host_9.Ping(host_10.Intf.Ip)
 	time.Sleep(100000000)
-	
 
+	fmt.Println("Test 7 (Echo Request / Ping On Different Subnet) ======================================")
+	host_11 := NewHost(IP{12, 0, 0, 11}, SubnetMask{255, 255, 255, 0}, IP{12, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 11})
+	go host_11.PowerOn()
+	host_12 := NewHost(IP{10, 0, 0, 12}, SubnetMask{255, 255, 255, 0}, IP{10, 0, 0, 255}, MAC{0, 0, 0, 0, 0, 12})
+	go host_12.PowerOn()
+	swt_8 := NewSwitch(2)
+	go swt_8.PowerOn()
+	swt_9 := NewSwitch(2)
+	go swt_9.PowerOn()
+	router_1 := NewRouter(2, []IP{IP{12, 0, 0, 255}, IP{10, 0, 0, 255}}, []SubnetMask{SubnetMask{255, 255, 255, 0}, SubnetMask{255, 255, 255, 0}}, []MAC{MAC{0, 0, 0, 0, 0, 250}, MAC{0, 0, 0, 0, 0, 251}})
+	go router_1.PowerOn()
+	Connect(&(host_11.Intf), &(swt_8.Ports[0]))
+	Connect(&(host_12.Intf), &(swt_9.Ports[0]))
+	Connect(&(swt_8.Ports[1]), &(router_1.Ports[0]))
+	Connect(&(swt_9.Ports[1]), &(router_1.Ports[1]))
+	host_11.Ping(host_12.Intf.Ip)
+	time.Sleep(120000000)
 
 	return
 }
-
 
 // TODO Can use mutex on receiving channels to emulate collision avoidance at the physical layer
 // (Alternatively, could use actual listening CSMA/CD-style to determine if anything has recently occurred on the channel,
